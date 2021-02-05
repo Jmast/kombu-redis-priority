@@ -6,12 +6,12 @@ from bisect import bisect
 from contextlib import contextmanager
 from itertools import chain
 from time import time, sleep
+from queue import Empty
 
 from kombu import transport
 from vine import promise
 
 from kombu.exceptions import InconsistencyError, VersionMismatch
-from kombu.five import Empty, values, string_t
 from kombu.log import get_logger
 from kombu.utils.compat import register_after_fork
 from kombu.utils.eventio import poll, READ, ERR
@@ -92,7 +92,7 @@ class MultiChannelPoller(object):
         self.after_read = set()
 
     def close(self):
-        for fd in values(self._chan_to_sock):
+        for fd in self._chan_to_sock.values():
             try:
                 self.poller.unregister(fd)
             except (KeyError, ValueError):
@@ -340,7 +340,7 @@ class Channel(virtual.Channel):
         self.handlers = {'ZREM': self._zrem_read, 'LISTEN': self._receive}
 
         if self.fanout_prefix:
-            if isinstance(self.fanout_prefix, string_t):
+            if isinstance(self.fanout_prefix, str):
                 self.keyprefix_fanout = self.fanout_prefix
         else:
             # previous versions did not set a fanout, so cannot enable
@@ -623,6 +623,8 @@ class Channel(virtual.Channel):
         """Deliver message."""
         pri = self._get_message_priority(message, reverse=False)
 
+        message['properties'].pop('errback', None)
+
         with self.conn_or_acquire() as client:
             client.zadd(queue, {self._add_time_prefix(dumps(message)): pri})
 
@@ -637,6 +639,15 @@ class Channel(virtual.Channel):
     def _new_queue(self, queue, auto_delete=False, **kwargs):
         if auto_delete:
             self.auto_delete_queues.add(queue)
+
+    def queue_bind(self, queue, exchange=None, routing_key='',
+                   arguments=None, **kwargs):
+        exchanges = self.state.exchanges
+        super().queue_bind(
+            queue, exchange=exchange, routing_key=routing_key,
+            arguments=arguments, **kwargs
+        )
+        exchanges = self.state.exchanges
 
     def _queue_bind(self, exchange, routing_key, pattern, queue):
         if self.typeof(exchange).type == 'fanout':
@@ -852,7 +863,7 @@ class Channel(virtual.Channel):
             Lower value has more priority.
         """
         try:
-            priority = int(message['properties']['zpriority'])
+            priority = float(message['properties']['zpriority'])
         except (TypeError, ValueError, KeyError):
             priority = self.default_zpriority
 
